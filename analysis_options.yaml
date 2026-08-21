@@ -1,0 +1,4 @@
+# riverpod_lint is an analysis-server plugin. It must be declared here, at the
+# workspace root: a `plugins:` block inside a package is ignored.
+plugins:
+  riverpod_lint: ^3.1.3
