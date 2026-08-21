@@ -5,8 +5,18 @@
 .packages
 .pub-cache/
 .pub/
-/build/
+
+# Build output. Unanchored so it also catches packages/*/build — the
+# per-package .gitignore files anchor their own rule and miss it.
+build/
 coverage/
+
+# Generated Dart — build_runner output (freezed, json_serializable,
+# go_router_builder, riverpod_generator). Recreated by `melos build`;
+# hand-editing one is reverted by the next build, so there is nothing
+# in them worth reviewing in a diff.
+*.freezed.dart
+*.g.dart
 
 # Swift Package Manager
 .build/

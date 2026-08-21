@@ -177,6 +177,10 @@ _None yet._
 - **D-2** (create time) — Error envelope: `ApiClient` reads a non-2xx body
   tolerantly and the backend's code beats the status in `AppException.code`.
   Messages are log-only; copy comes from `forCode`, with the type as fallback.
+- **D-3** (2026-08-21) — Generated Dart (`*.freezed.dart`, `*.g.dart`) and every
+  `build/` directory are gitignored at the workspace root. Codegen output is a
+  pure function of the sources plus `melos build`, so committing it only adds
+  merge conflicts and unreviewable diff noise.
 
 ## Gotchas
 <!-- append only · NEVER deleted · id G-<n> -->
@@ -191,11 +195,22 @@ _None yet._
 - **G-3** — Parsing a non-2xx body must stay in a `try`/`catch`: a bare
   `jsonDecode` on an HTML error page throws, losing the status and the `code`
   that tells one outage from another in the crash reporter.
+- **G-4** — Because of D-3, a fresh clone does not analyze or run until
+  `melos bs && melos build` has generated the freezed / json_serializable /
+  go_router / riverpod outputs. Hundreds of "undefined class `_$Foo`" errors
+  from `melos analyze` on a clean checkout mean codegen has not run, not that
+  the tree is broken.
 
 ## Session Log
 <!-- format: `- <YYYY-MM-DD> <what changed> (skill|manual) -> <where it landed>` -->
 <!-- newest first · keep the newest 10 · older entries move verbatim to .claude/memory/CHANGELOG.md -->
 
+- _2026-08-21_ — root `.gitignore`: `/build/` -> unanchored `build/` (the old
+  anchored rule missed `packages/core/build/`), plus `*.freezed.dart` and
+  `*.g.dart`. Recorded as D-3 / G-4. Three build artifacts committed in the
+  initial commit (`packages/core/build/5f4da827.../{.filecache,
+  gen_localizations.stamp,outputs.json}`) are still tracked and need
+  `git rm -r --cached` to drop.
 - _create time_ — workspace scaffolded: `packages/core` plus
   `packages/hello`, baseline `onboarding` feature, eleven `core` components (manual)
   → whole tree
