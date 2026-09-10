@@ -4,6 +4,7 @@ import 'dart:ui' show ErrorCallback, PlatformDispatcher;
 import 'package:core/core.dart';
 import 'package:flutter/foundation.dart' show FlutterExceptionHandler;
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 // `Override` is exported by riverpod_annotation, not flutter_riverpod.
 import 'package:riverpod_annotation/riverpod_annotation.dart' show Override;
@@ -40,7 +41,6 @@ void main() {
     FlutterError.onError = previousOnError;
     PlatformDispatcher.instance.onError = previousPlatformOnError;
     ErrorWidget.builder = previousErrorWidgetBuilder;
-    appErrorReporter = const NoopErrorReporter();
   });
 
   /// Runs `bootstrap` on the real clock, with a deadline, and hands the
@@ -66,6 +66,9 @@ void main() {
     WidgetTester tester, {
     required FutureOr<Widget> Function() builder,
     required Future<List<Override>> Function(Environment) overridesBuilder,
+    // Passes no reporter at all, so bootstrap falls back to the default it
+    // builds itself.
+    bool useDefaultReporter = false,
   }) async {
     final bindingOnError = FlutterError.onError;
     final bindingErrorWidgetBuilder = ErrorWidget.builder;
@@ -76,7 +79,7 @@ void main() {
           builder,
         environment: Environment.test,
         overridesBuilder: overridesBuilder,
-          reporter: reporter,
+          reporter: useDefaultReporter ? null : reporter,
         ).timeout(const Duration(seconds: 5));
         return true;
       } on TimeoutException {
@@ -172,21 +175,35 @@ void main() {
     expect(reporter.reported.single, isA<StateError>());
   });
 
-  testWidgets('installs the reporter as the breadcrumb sink before composing',
+  testWidgets('binds the reporter it installed in the crash net',
       (tester) async {
-    // `appErrorReporter` backs the handled-failure lane, so a breadcrumb
-    // captured during composition has to reach the real sink, not the no-op.
-    ErrorReporter? sinkDuringInit;
-
+    // The invariant the whole design rests on: one object serves both lanes.
+    // `same`, not `isA` — a second instance of the right type would satisfy a
+    // type check while silently splitting the crash lane from the handled one.
     await runBootstrap(
       tester,
       builder: () => const MaterialApp(home: Text('composed')),
-      overridesBuilder: (_) async {
-        sinkDuringInit = appErrorReporter;
-        return [];
-      },
+      overridesBuilder: (_) async => [],
     );
 
-    expect(sinkDuringInit, same(reporter));
+    expect(ProviderScope.containerOf(
+        tester.element(find.text('composed')),
+      ).read(errorReporterProvider), same(reporter));
+  });
+
+  testWidgets('falls back to a console reporter when none is passed',
+      (tester) async {
+    // `reporter` is nullable and bootstrap owns the fallback, so an app that
+    // wires nothing still reports somewhere rather than discarding silently.
+    await runBootstrap(
+      tester,
+      builder: () => const MaterialApp(home: Text('composed')),
+      overridesBuilder: (_) async => [],
+      useDefaultReporter: true,
+    );
+
+    expect(ProviderScope.containerOf(
+        tester.element(find.text('composed')),
+      ).read(errorReporterProvider), isA<ConsoleErrorReporter>());
   });
 }

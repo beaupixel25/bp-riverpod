@@ -87,6 +87,11 @@ awk '/^## Session Log/{f=1;next} /^## /{f=0} f&&/^- /' MEMORY.md | wc -l  # > 20
 - **`core` exports:** `full` — a single `core.dart` barrel
 - **Design system:** a design-system bundle applied at create time
 - **Features:** `onboarding` (baseline slice shipped at create time)
+- **Error reporting:** `errorReporterProvider` in `core`, defaulting to a
+  no-op. `bootstrap` owns the instance: it builds a `ConsoleErrorReporter` when
+  a `main_<flavor>.dart` passes none, installs it in the crash net, hands it to
+  `AppProviderObserver`, and splices `overrideWithValue` into the root scope.
+  `ref.guardAppException` reads it. See D-4.
 - **Last verified:** never — run `melos bs && melos build && melos analyze`
 
 ## Feature Map
@@ -181,6 +186,29 @@ _None yet._
   `build/` directory are gitignored at the workspace root. Codegen output is a
   pure function of the sources plus `melos build`, so committing it only adds
   merge conflicts and unreviewable diff noise.
+- **D-4** (2026-09-10) — `ErrorReporter` reaches its consumers through a
+  Riverpod provider, not through the `appErrorReporter` global (deleted), and
+  **`bootstrap` owns the instance end to end**. It is a nullable parameter:
+  pass one to forward crashes to Sentry/Crashlytics, or pass nothing and
+  `bootstrap` builds a `ConsoleErrorReporter` (which lives in `core`, beside
+  `NoopErrorReporter`, precisely so `core` can construct the default without
+  naming an app class). That one object is installed in `FlutterError.onError`
+  / `PlatformDispatcher.onError`, handed to `AppProviderObserver`, and bound to
+  `errorReporterProvider` by an override `bootstrap` prepends to the list
+  `overridesBuilder` returns — first in the list, so an app's own
+  `buildOverrides` can still replace it. One door, so the crash lane and the
+  handled lane cannot drift apart, and all four `main_<flavor>.dart` stay free
+  of reporter wiring.
+- **D-5** (2026-09-10) — The ref rule relaxed: `ref.read` is no longer banned
+  outright, it is confined to Notifier **methods** while `ref.watch` stays
+  confined to `build()`. `guardAppException` became an extension on `Ref`
+  (`ref.guardAppException(…)`) because a free function cannot reach a provider,
+  and threading the reporter through every call site instead would have put a
+  cross-cutting service into three constructors. Riverpod's own docs place
+  `ref.read` in methods, so this moves the rule onto their guidance rather than
+  one step stricter than it. Dependencies are still resolved once in `build()`
+  onto `late` fields — `ref.read` fetching a use case from a method is still
+  wrong.
 
 ## Gotchas
 <!-- append only · NEVER deleted · id G-<n> -->
@@ -200,8 +228,32 @@ _None yet._
   go_router / riverpod outputs. Hundreds of "undefined class `_$Foo`" errors
   from `melos analyze` on a clean checkout mean codegen has not run, not that
   the tree is broken.
+- **G-5** — `errorReporterProvider` defaults to `NoopErrorReporter`, **not** an
+  `UnimplementedError` like `buildConfigurationProvider`. A widget test builds a
+  bare `ProviderScope` with no root override, and a throwing default would fire
+  from inside `ref.guardAppException`'s catch — turning a handled failure into
+  a crash in the code path meant to prevent one. Pinned in
+  `packages/hello/test/di/overrides_test.dart`.
+- **G-6** — `bootstrap` binds the reporter by prepending an override to the
+  list `overridesBuilder` returns, so the binding does not exist until that
+  future completes. A failure captured *during* `overridesBuilder()`
+  breadcrumbs to the default no-op, which is why `bootstrap`'s own `try`/`catch`
+  reports composition failures directly instead of relying on the handled lane.
 
 ## Session Log
+- _2026-09-10_ — `ErrorReporter` moved off the mutable `appErrorReporter`
+  global and onto a Riverpod provider (D-4, D-5, G-5, G-6). Deleted the global
+  from `core/src/error/error_reporter.dart` and added `ConsoleErrorReporter`
+  beside it; added `errorReporterProvider` to
+  `core/src/presentation/riverpod/async_error_handling.dart`; `bootstrap`'s
+  `reporter` is now nullable, it builds that default itself and prepends
+  `errorReporterProvider.overrideWithValue(sink)` to the root scope.
+  `guardAppException` free function -> `Ref.guardAppException` extension, so the
+  three controllers (`app_controller`, `login_controller`, `signup_controller`)
+  gained a `ref.` prefix and nothing else. `CLAUDE.md` rules 9 and 11 relaxed
+  accordingly. No `main_<flavor>.dart` changed. Every changed file under
+  `packages/` is a byte-for-byte copy of
+  `bp create --state-management riverpod` output.
 <!-- format: `- <YYYY-MM-DD> <what changed> (skill|manual) -> <where it landed>` -->
 <!-- newest first · keep the newest 10 · older entries move verbatim to .claude/memory/CHANGELOG.md -->
 

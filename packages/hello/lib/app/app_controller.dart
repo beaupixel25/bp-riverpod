@@ -61,7 +61,7 @@ class AppController extends _$AppController {
     // throwing token-store check becomes this AsyncError instead of escaping
     // to PlatformDispatcher.onError. Leaving isSignedIn false on failure is
     // correct: an unreadable session lands on /landing, not /main.
-    final startup = await guardAppException(() async {
+    final startup = await ref.guardAppException(() async {
       isSignedIn = await _restoreSession();
     });
     state = state.copyWith(startup: startup, isSignedIn: isSignedIn);

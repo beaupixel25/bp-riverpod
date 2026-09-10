@@ -23,6 +23,13 @@ void main() {
       );
       expect(container.read(loginUseCaseProvider), isA<LoginUseCase>());
       expect(container.read(signupUseCaseProvider), isA<SignupUseCase>());
+
+      // Not overridden by buildOverrides — `bootstrap` binds it at the root
+      // scope instead. What matters here is that the default resolves rather
+      // than throwing: a widget test builds a bare scope, and a throwing
+      // lookup inside `ref.guardAppException` would turn a handled failure
+      // into a crash.
+      expect(container.read(errorReporterProvider), isA<NoopErrorReporter>());
     });
   }
 }

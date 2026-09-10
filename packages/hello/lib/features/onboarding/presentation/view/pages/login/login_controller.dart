@@ -17,8 +17,8 @@ part 'login_controller.g.dart';
 /// [AppException] on failure. There is no separate status enum — `AsyncValue`
 /// already encodes all four, and keeps the previous value across a failure.
 ///
-/// Dependencies are resolved once, in [build], onto fields. Methods never touch
-/// `ref`. See the ref-confinement rule in
+/// Dependencies are resolved once, in [build], onto fields — a method must not
+/// reach for `ref.watch` to fetch one. See the ref rule in
 /// `.claude/skills/implement-feature/SKILL.md`.
 /// {@endtemplate}
 @riverpod
@@ -42,7 +42,7 @@ class LoginController extends _$LoginController {
     required String password,
   }) async {
     state = const AsyncValue.loading();
-    state = await guardAppException(
+    state = await ref.guardAppException(
       () => _loginUseCase.execute(
         input: Credentials(email: email, password: password),
       ),

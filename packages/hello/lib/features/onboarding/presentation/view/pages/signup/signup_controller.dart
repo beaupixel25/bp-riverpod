@@ -32,7 +32,7 @@ class SignupController extends _$SignupController {
     required String password,
   }) async {
     state = const AsyncValue.loading();
-    state = await guardAppException(
+    state = await ref.guardAppException(
       () => _signupUseCase.execute(
         input: EmailSignup(email: email, password: password),
       ),

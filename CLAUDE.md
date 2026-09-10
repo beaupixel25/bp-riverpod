@@ -130,19 +130,20 @@ pair. Full diagram and reasoning: README's "Startup walkthrough".
 
 ### Riverpod rules
 
-9. **`ref` may appear in exactly two places**: inside a `@riverpod` provider
-   function body, and inside a `Notifier.build()`. Nowhere else — not in a
-   repository, not in a use case, not in a Notifier method, not in a widget
-   callback. **`ref.read` is banned outright**, one step stricter than
-   Riverpod's own docs. Check: `grep -rn "ref\.read(" packages/*/lib` returns
-   zero hits.
+9. **`ref` belongs to providers and notifiers** — never a repository, a use
+   case, or a widget callback. The two verbs split by position:
+   **`ref.watch` only in `build()`** (one registered from a method leaks —
+   `build()` never re-registers it), **`ref.read` only in methods**. Resolve
+   dependencies once in `build()` onto `late` fields; `ref.read` is for a
+   cross-cutting service no field should hold, which today means one thing:
+   `ref.guardAppException(…)` reaching `errorReporterProvider`.
 10. **Providers are typed as the domain contract** (`I<Feature>Repository`),
     never as the implementation. Everything below `presentation` is plain Dart
     with constructor parameters — constructible in a test with no container.
 11. **A Notifier's dependency fields are `late`, never `late final`.** The
     notifier instance outlives a rebuild while `build()` runs again, so
     `late final` throws `LateInitializationError` on the second run. Resolve
-    dependencies once, in `build()`; methods never touch `ref`.
+    dependencies once, in `build()`, with `ref.watch`.
 12. **Per-environment bindings live in `di/<feature>_overrides.dart`** and are
     applied at the **root scope**. Never `switch` on the environment inside a
     provider — root overrides are what let a release build tree-shake the mock.

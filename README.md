@@ -376,10 +376,12 @@ an account, and the backend answers `409` with
 4. **The domain.** `UseCase.execute` rethrows an `AppException` untouched and
    wraps anything else in an `UnknownException`. Only an `AppException` ever
    reaches presentation.
-5. **The state holder.** `guardAppException` catches `AppException` **and nothing
-   else**, records it as state, and breadcrumbs it to `appErrorReporter`.
-   Anything that is not an `AppException` keeps travelling — out of the
-   callback, out of the frame, into the global net.
+5. **The state holder.** `ref.guardAppException` catches `AppException` **and nothing
+   else**, records it as state, and breadcrumbs it to the `ErrorReporter`
+   `bootstrap` bound to `errorReporterProvider` — the
+   same instance the crash lane reports to. Anything that is not an
+   `AppException` keeps travelling — out of the callback, out of the frame,
+   into the global net.
 6. **The sentence.** `failure.toUserMessage(AppErrorMessages(context.l10n))`
    asks `forCode('EMAIL_ALREADY_REGISTERED')` first, which resolves
    `l10n.errorEmailAlreadyRegistered` — "That email already has an account. Log
@@ -522,19 +524,19 @@ an account, and the backend answers `409` with
       │ ErrorReporter.report(error, stackTrace)   core/core.dart   │
       │                                                            │
       │ vendor-agnostic; core never names a crash service          │
-      │ default NoopErrorReporter() discards everything, so a      │
-      │ freshly generated project runs with no backend             │
+      │ bootstrap builds a ConsoleErrorReporter unless an app      │
+      │ passes its own, then binds that one object to both lanes   │
       │                                                            │
       │ an UnauthorizedException also fires onUnauthorized()       │
       │                                                            │
       └────────────────────────────────────────────────────────────┘
-                    │  passed to bootstrap(reporter: …) by main_<flavor>.dart
+                    │  bootstrap(reporter: …) — pass nothing for the console one
                     │
       ┌────────────────────────────────────────────────────────────┐
       │ THIRD PARTY · Sentry · Crashlytics · Bugsnag · …           │
       │                                                            │
       │ your app writes one class implementing ErrorReporter       │
-      │ and passes it in; core has no dependency on it.            │
+      │ and hands it to bootstrap; core depends on none of them.   │
       └────────────────────────────────────────────────────────────┘
 ```
 
@@ -569,12 +571,14 @@ into a silent one:
 
 #### Wiring a real sink
 
-`core` never depends on a crash reporter. Implement `ErrorReporter` in your app
-and pass it to `bootstrap` — that installs it for the global net *and* for
-`appErrorReporter`, which is what the handled lane uses:
+`core` never depends on a crash reporter. Out of the box `bootstrap` builds a
+`ConsoleErrorReporter`, which writes both lanes to the developer log. To send
+them somewhere real, implement `ErrorReporter` in your app:
 
 ```dart
 class SentryErrorReporter implements ErrorReporter {
+  const SentryErrorReporter();
+
   @override
   Future<void> report(Object error, StackTrace stackTrace) =>
       Sentry.captureException(error, stackTrace: stackTrace);
@@ -587,6 +591,28 @@ class SentryErrorReporter implements ErrorReporter {
 
 Both methods are required. `implements` takes the interface, never the
 implementation, so the default body on `reportHandled` does not spare you.
+
+Then add one line to whichever `main_<flavor>.dart` should use it — the rest of
+the call stays exactly as generated:
+
+```dart
+await bootstrap(
+  () => const MyApp(),
+  reporter: const SentryErrorReporter(),
+  // ...
+);
+```
+
+**One door, not two.** `bootstrap` owns the instance: it installs that object
+in the global error net, hands it to `AppProviderObserver`, and binds it to `errorReporterProvider` at the root scope. The crash lane and the
+handled lane therefore report to the same object, and there is no second place
+to remember to wire. Pass nothing and the console reporter arrives the same way.
+
+The moment it is bound matters: the root scope does not exist until `overridesBuilder` has returned.
+A failure captured before that point breadcrumbs to a no-op rather than to your
+sink — a window of a few milliseconds during composition, and the reason
+`bootstrap`'s own `try`/`catch` reports composition failures directly rather
+than relying on the handled lane.
 
 ## Startup walkthrough
 

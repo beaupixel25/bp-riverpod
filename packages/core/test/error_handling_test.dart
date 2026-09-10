@@ -94,9 +94,9 @@ void main() {
     });
   });
 
-  group('guardAppException (presentation layer)', () {
+  group('Ref.guardAppException (presentation layer)', () {
     test('captures an AppException as AsyncError', () async {
-      final result = await guardAppException<int>(
+      final result = await runGuarded<int>(
         () async => throw const UnauthorizedException(message: 'nope'),
       );
 
@@ -105,7 +105,7 @@ void main() {
     });
 
     test('captures a value as AsyncData', () async {
-      final result = await guardAppException<int>(() async => 7);
+      final result = await runGuarded<int>(() async => 7);
 
       expect(result, isA<AsyncData<int>>());
       expect(result.value, 7);
@@ -116,7 +116,7 @@ void main() {
     // becoming quiet error state.
     test('rethrows a non-AppException', () async {
       await expectLater(
-        guardAppException<int>(() async => throw StateError('bad')),
+        runGuarded<int>(() async => throw StateError('bad')),
         throwsA(isA<StateError>()),
       );
     });
@@ -174,16 +174,48 @@ void main() {
       // Handled is not the same as invisible: the UI showed a sentence, and
       // the crash sink still has to know it happened.
       final reporter = _RecordingReporter();
-      appErrorReporter = reporter;
-      addTearDown(() => appErrorReporter = const NoopErrorReporter());
 
-      await guardAppException<int>(
+      await runGuarded<int>(
         () async => throw const ServerException(code: '500'),
+        reporter: reporter,
       );
+
       expect(reporter.handled.single.code, '500');
       expect(reporter.crashes, isEmpty);
     });
+
+    test('the default reporter is a no-op, not a throw', () async {
+      // Nothing overrides errorReporterProvider here. Resolving it must still
+      // work: a bare scope is what a widget test builds, and a lookup that
+      // threw would turn a handled failure into a crash inside the very code
+      // path meant to prevent one.
+      final result = await runGuarded<int>(
+        () async => throw const ServerException(code: '500'),
+      );
+
+      expect(result, isA<AsyncError<int>>());
+    });
   });
+}
+
+/// Runs [body] through `Ref.guardAppException` inside a throwaway container.
+///
+/// A `Provider` body is the smallest thing that owns a `Ref`, which is what
+/// the extension needs. Passing [reporter] overrides `errorReporterProvider`
+/// the same way `bootstrap` does at the root scope.
+Future<AsyncValue<T>> runGuarded<T>(
+  Future<T> Function() body, {
+  ErrorReporter? reporter,
+}) {
+  final probe = Provider<Future<AsyncValue<T>>>(
+    (ref) => ref.guardAppException<T>(body),
+  );
+  final container = ProviderContainer.test(
+    overrides: [
+      if (reporter != null) errorReporterProvider.overrideWithValue(reporter),
+    ],
+  );
+  return container.read(probe);
 }
 
 /// Captures both lanes so a test can tell a breadcrumb from a crash.

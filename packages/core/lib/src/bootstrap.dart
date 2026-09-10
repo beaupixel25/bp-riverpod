@@ -5,6 +5,7 @@ import 'dart:ui' show PlatformDispatcher;
 import 'package:core/src/app_provider_observer.dart';
 import 'package:core/src/constants/environment.dart';
 import 'package:core/src/error/error_reporter.dart';
+import 'package:core/src/presentation/riverpod/async_error_handling.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
@@ -19,25 +20,29 @@ import 'package:riverpod_annotation/riverpod_annotation.dart' show Override;
 /// the first frame (the `@preResolve` equivalent) can be awaited here and
 /// supplied via `overrideWithValue`.
 ///
-/// [reporter] defaults to a `NoopErrorReporter`; pass a real one to forward
-/// crashes to Sentry/Crashlytics/etc. [onUnauthorized] is invoked when an
-/// `UnauthorizedException` reaches the observer.
+/// [reporter] is the crash sink, and this function owns it: pass one to
+/// forward crashes to Sentry/Crashlytics/etc., or pass nothing and get a
+/// `ConsoleErrorReporter`. Whichever it is, the same instance is installed in
+/// the global error net, handed to the observer, and bound to
+/// `errorReporterProvider` at the root scope — so the crash lane and the
+/// handled lane report to one object and no `main_<flavor>.dart` has to wire
+/// anything.
+///
+/// [onUnauthorized] is invoked when an `UnauthorizedException` reaches the
+/// observer.
 Future<void> bootstrap(
   FutureOr<Widget> Function() builder, {
   required Environment environment,
   required Future<List<Override>> Function(Environment) overridesBuilder,
-  ErrorReporter reporter = const NoopErrorReporter(),
+  ErrorReporter? reporter,
   void Function()? onUnauthorized,
 }) async {
-  // With the other global installs, and deliberately before composition:
-  // a failure `guardAppException` captures while `overridesBuilder()` runs
-  // would otherwise breadcrumb to the no-op.
-  appErrorReporter = reporter;
+  final sink = reporter ?? const ConsoleErrorReporter();
 
   FlutterError.onError = (details) {
     log(details.exceptionAsString(), stackTrace: details.stack);
     unawaited(
-      reporter.report(details.exception, details.stack ?? StackTrace.current),
+      sink.report(details.exception, details.stack ?? StackTrace.current),
     );
   };
 
@@ -49,7 +54,7 @@ Future<void> bootstrap(
   // the start-up cost a zone imposes on Dart's core libraries.
   PlatformDispatcher.instance.onError = (error, stackTrace) {
     log(error.toString(), stackTrace: stackTrace);
-    unawaited(reporter.report(error, stackTrace));
+    unawaited(sink.report(error, stackTrace));
     return true;
   };
 
@@ -66,10 +71,15 @@ Future<void> bootstrap(
 
     runApp(
       ProviderScope(
-        overrides: overrides,
+        // The reporter override goes first so an app's own `buildOverrides`
+        // can still replace it: a later entry for the same provider wins.
+        overrides: [
+          errorReporterProvider.overrideWithValue(sink),
+          ...overrides,
+        ],
         observers: [
           AppProviderObserver(
-            reporter: reporter,
+            reporter: sink,
             onUnauthorized: onUnauthorized,
           ),
         ],
@@ -88,7 +98,7 @@ Future<void> bootstrap(
     // throws, it routes the error to its handler and then abandons the future
     // it returned, so `await` on it never returns and `main()` hangs.
     log(error.toString(), stackTrace: stackTrace);
-    unawaited(reporter.report(error, stackTrace));
+    unawaited(sink.report(error, stackTrace));
     runApp(const _BootstrapFailure());
   }
 }
