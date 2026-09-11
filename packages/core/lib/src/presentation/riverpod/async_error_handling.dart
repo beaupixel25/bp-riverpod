@@ -1,7 +1,3 @@
-// `show unawaited`, not a bare import: dart:async exports its own AsyncError,
-// which would shadow Riverpod's and make the pattern match below ambiguous.
-import 'dart:async' show unawaited;
-
 import 'package:core/src/domain/exceptions/app_exception.dart';
 import 'package:core/src/error/error_reporter.dart';
 // riverpod_annotation re-exports AsyncValue, Ref and Provider, so importing
@@ -10,13 +6,18 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 part 'async_error_handling.g.dart';
 
-/// The app's crash sink.
+/// The app's crash sink, reachable from provider code.
 ///
 /// Overridden at the root `ProviderScope` by `bootstrap`, which owns the
 /// instance and hands the same one to the global error net and to
-/// `AppProviderObserver`. The default is a no-op rather than an
-/// `UnimplementedError` — unlike `buildConfigurationProvider`, this one has a
-/// sensible answer for a widget test that builds a bare scope.
+/// `AppProviderObserver`. Reporting a provider failure is the observer's job,
+/// so nothing in `core` reads this — it is here for app code that wants to
+/// report something no provider ever failed on, and it is what makes "the
+/// observer and the container hold the same object" assertable.
+///
+/// The default is a no-op rather than an `UnimplementedError` — unlike
+/// `buildConfigurationProvider`, this one has a sensible answer for a widget
+/// test that builds a bare scope.
 @Riverpod(keepAlive: true)
 ErrorReporter errorReporter(Ref ref) => const NoopErrorReporter();
 
@@ -29,12 +30,15 @@ extension AsyncErrorHandling on Ref {
   /// reaches `PlatformDispatcher.onError` / `AppProviderObserver` instead of
   /// being swallowed.
   ///
-  /// A captured failure is also breadcrumbed to [errorReporterProvider]: the
-  /// UI renders a sentence, and the crash sink sees that it happened.
+  /// A captured failure is still breadcrumbed to the crash sink — but by
+  /// `AppProviderObserver`, not here. Assigning the returned [AsyncError] to a
+  /// Notifier's `state` fires `ProviderObserver.providerDidFail`, so the
+  /// observer already sees every failure this captures. Reporting from both
+  /// places filed each handled failure twice, once as a breadcrumb and once as
+  /// a crash complete with a stack trace.
   ///
-  /// An extension on [Ref] rather than a free function so it can reach the
-  /// reporter without every Notifier threading one through. A Notifier's own
-  /// `ref` is the receiver, so the call reads the same from any method:
+  /// An extension on [Ref] rather than a free function so a Notifier's own
+  /// `ref` is the receiver and the call reads the same from any method:
   ///
   /// ```dart
   /// state = const AsyncValue.loading();
@@ -42,14 +46,8 @@ extension AsyncErrorHandling on Ref {
   ///   () => _loginUseCase.execute(input: email),
   /// );
   /// ```
-  Future<AsyncValue<T>> guardAppException<T>(Future<T> Function() body) async {
-    final result =
-        await AsyncValue.guard(body, (error) => error is AppException);
-    if (result case AsyncError(:final error) when error is AppException) {
-      unawaited(read(errorReporterProvider).reportHandled(error));
-    }
-    return result;
-  }
+  Future<AsyncValue<T>> guardAppException<T>(Future<T> Function() body) =>
+      AsyncValue.guard(body, (error) => error is AppException);
 }
 
 /// Normalizes an error taken off an [AsyncValue] to an [AppException].

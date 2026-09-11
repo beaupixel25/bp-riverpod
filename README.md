@@ -198,7 +198,7 @@ meet only in the sense that the second happens after the first.
     │ LoginPage                    │          │ LoginController   (@riverpod)  │
     │ (ConsumerStatefulWidget)     │          │                                │
     │                              │──calls─▶ │ state = AsyncValue<AuthToken?> │
-    │ ref.watch(…)  ─▶ state       │          │ guardAppException(() => …)     │
+    │ ref.watch(…)  ─▶ state       │          │ ref.guardAppException(() => …) │
     │ core components, from        │◀──state─ │ build(): ref.watch(useCase)    │
     │ core/core.dart               │          │                                │
     └──────────────────────────────┘          └────────────────────────────────┘
@@ -377,11 +377,13 @@ an account, and the backend answers `409` with
    wraps anything else in an `UnknownException`. Only an `AppException` ever
    reaches presentation.
 5. **The state holder.** `ref.guardAppException` catches `AppException` **and nothing
-   else**, records it as state, and breadcrumbs it to the `ErrorReporter`
-   `bootstrap` bound to `errorReporterProvider` — the
-   same instance the crash lane reports to. Anything that is not an
-   `AppException` keeps travelling — out of the callback, out of the frame,
-   into the global net.
+   else** and records it as state. Assigning that `AsyncError` to `state`
+   fires `AppProviderObserver.providerDidFail`, and **that** is what
+   breadcrumbs it — one reporting site, so a captured failure cannot be filed
+   twice. `guardAppException` deliberately reports nothing itself, and the
+   observer holds the same instance `bootstrap` bound to
+   `errorReporterProvider`. Anything that is not an `AppException` keeps
+   travelling — out of the callback, out of the frame, into the global net.
 6. **The sentence.** `failure.toUserMessage(AppErrorMessages(context.l10n))`
    asks `forCode('EMAIL_ALREADY_REGISTERED')` first, which resolves
    `l10n.errorEmailAlreadyRegistered` — "That email already has an account. Log
@@ -389,8 +391,9 @@ an account, and the backend answers `409` with
    falls back to the type: `NetworkException` → `errorNetwork`, and so on.
 7. **The sink.** Sentry (or Crashlytics, or whatever you wire) sees this as a
    *breadcrumb*, not an issue: the user got a sentence and the app carried on.
-   Had nothing caught it, it would have arrived through
-   `ErrorReporter.report` as a crash, with its cause and original stack trace.
+   `reportHandled` logs no stack trace, which is the visible difference.
+   Had the failure not been an `AppException`, it would have arrived through
+   `ErrorReporter.report` as a crash, with its stack trace.
 
 #### Where it goes
 
@@ -467,7 +470,7 @@ an account, and the backend answers `409` with
     │ EXPECTED — becomes state                   │  │ UNEXPECTED               │
     │                                            │  │                          │
     │ state = const AsyncValue.loading();        │  │ not an AppException,     │
-    │ state = await guardAppException(           │  │ or nothing caught it     │
+    │ state = await ref.guardAppException(       │  │ or nothing caught it     │
     │   () => _useCase.execute(input: …));       │  │                          │
     │                                            │  │ It keeps going: out      │
     │ AsyncValue.guard(body,                     │  │ of the callback, out     │
@@ -505,7 +508,9 @@ an account, and the backend answers `409` with
   │  └──────────────────────────────────────────────────────────────┘  │
   │  ┌──────────────────────────────────────────────────────────────┐  │
   ├─▶│ AppProviderObserver.providerDidFail                          │──┤
-  │  │ a provider failure no notifier captured as state.            │  │
+  │  │ every provider failure, captured or not — assigning an       │  │
+  │  │ AsyncError to a Notifier state fires this too. A typed       │  │
+  │  │ AppException breadcrumbs; anything else is a crash.          │  │
   │  │ Installed on the root ProviderScope.                         │  │
   │  └──────────────────────────────────────────────────────────────┘  │
      There is deliberately no error Zone: a custom zone would          │
@@ -515,7 +520,8 @@ an account, and the backend answers `409` with
      A composition failure is caught by bootstrap's own try/catch,     │
      which reports it and renders the failure surface.                 │
                                                                        │
-     all of them hand the error and its stack trace to:                │
+     the first two hand error + stack trace to report(). The observer  │
+     picks its lane by type — report() or reportHandled():             │
                                                                        │
   ─ ─ ─ ─ ─ ─ ─   REPORTING SINK · leaves your code   ─ ─ ─ ─ ─ ─ ─ ─ ─│─ ─ ─ ─
                     ┌──────────────────────────────────────────────────┘
@@ -526,6 +532,9 @@ an account, and the backend answers `409` with
       │ vendor-agnostic; core never names a crash service          │
       │ bootstrap builds a ConsoleErrorReporter unless an app      │
       │ passes its own, then binds that one object to both lanes   │
+      │                                                            │
+      │ reportHandled(AppException) is the breadcrumb lane: no     │
+      │ stack trace, because the user already read a sentence      │
       │                                                            │
       │ an UnauthorizedException also fires onUnauthorized()       │
       │                                                            │
@@ -547,7 +556,8 @@ an account, and the backend answers `409` with
 | `ApiClient` | status → exception kind, backend code → `AppException.code` | know a sentence, or map transport/parse failures |
 | `BaseRepository.guard` | raw error → typed `AppException`, trace preserved | `catch (_)`, or re-map what `ApiClient` already typed |
 | `UseCase.execute` | rethrow typed, wrap untyped | swallow anything |
-| `guardAppException` | typed failure → state + breadcrumb | catch anything that is not an `AppException` |
+| `guardAppException` | typed failure → state | catch anything that is not an `AppException` |
+| `AppProviderObserver` | every provider failure → one lane: breadcrumb if typed, crash if not | report a failure `guardAppException` already reported |
 | `AppErrorMessages` | code → sentence, else type → sentence | show `message` verbatim |
 | `ErrorReporter` | crashes as issues, handled failures as breadcrumbs | live in `core` as a vendor SDK |
 
@@ -576,21 +586,63 @@ into a silent one:
 them somewhere real, implement `ErrorReporter` in your app:
 
 ```dart
-class SentryErrorReporter implements ErrorReporter {
+class SentryErrorReporter extends ErrorReporter {
   const SentryErrorReporter();
 
   @override
-  Future<void> report(Object error, StackTrace stackTrace) =>
-      Sentry.captureException(error, stackTrace: stackTrace);
-
-  @override
-  Future<void> reportHandled(AppException error) async =>
-      Sentry.addBreadcrumb(Breadcrumb(message: error.toString()));
+  Future<void> report(
+    Object error,
+    StackTrace stackTrace, {
+    bool handled = false,
+    StackTrace? handledAt,
+    StackTrace? invokedAt,
+  }) async {
+    if (!handled) {
+      await Sentry.captureException(error, stackTrace: stackTrace);
+      return;
+    }
+    Sentry.addBreadcrumb(
+      Breadcrumb(
+        message: '$error',
+        data: {'handledAt': '$handledAt', 'invokedAt': '$invokedAt'},
+      ),
+    );
+  }
 }
 ```
 
-Both methods are required. `implements` takes the interface, never the
-implementation, so the default body on `reportHandled` does not spare you.
+**One method, and `extends` rather than `implements`.** Both lanes arrive at
+`report`; `handled` tells them apart. `reportHandled` is concrete on
+`ErrorReporter` and funnels into `report` with `handled: true`, so extending
+gets you that for free — `implements` takes the interface and not the
+implementation, which would put the funnel back on you to reproduce.
+
+`reportHandled` gets three stacks and they answer three questions.
+`error.stackTrace` is where the failure was **thrown**; `handledAt` is the
+code that **handled** it; `invokedAt` is what **started** the action. A count
+of breadcrumbs tells you how often something breaks; the three together tell
+you whether whatever is already catching it is good enough, and which screen
+it came from. `ConsoleErrorReporter` prints one frame of each, as a tree
+under the header (`package:` paths elided here for width):
+
+```text
+handled: ServerException(message: null, code: 500, cause: null)
+├─ thrown at:  OrdersRepository.fetch (orders_repository.dart:41:7)
+├─ handled at: AppProviderObserver.providerDidFail (app_provider_observer.dart:78:11)
+└─ invoked at: OrdersController.load (orders_controller.dart:31:5)
+```
+
+The first two are frame 0 and unfiltered. `guard` rethrows with
+`Error.throwWithStackTrace`, so frame 0 of `error.stackTrace` *is* the throw
+site; `handledAt` is captured inside the `on AppException` catch, so frame 0
+of it is the handler. `invokedAt` is the one that skips frames — whoever
+captured it is itself the top of that trace, so `core` and the
+state-management package are stepped over to reach your call site.
+
+The three rows are coloured whenever `ConsoleErrorReporter.colored` is on,
+which it is by default in debug and off in release. Turn it off with `const ConsoleErrorReporter(colored: false)`
+where escape codes are noise rather than colour: a log file, a CI job, or a
+debug build on a device writing to logcat.
 
 Then add one line to whichever `main_<flavor>.dart` should use it — the rest of
 the call stays exactly as generated:
@@ -633,7 +685,7 @@ that kind.
 | 8 | `App` / `BaseApp` | `packages/core/lib/src/presentation/views/apps/app/app.dart` | `App` resolves the `AppThemeData` (falling back to the core design system), supplies `MediaQuery` + text scaling, and hosts app-wide overlays as siblings of the `MaterialApp`. `BaseApp` is the `MaterialApp.router` itself: routing, light/dark theme, localization delegates, responsive breakpoints. | you add a global overlay (toasts, alerts), a locale, or a breakpoint |
 | 8a | `LaunchRoute` / `LaunchPage` | `lib/routing/routes.dart`, `lib/app/view/launch_page.dart` | The app's cold start, at `/`. `LaunchRoute` never names a destination — it hands `LaunchPage` an `onResolved` callback, so deleting a feature can never reach it. `LaunchPage` runs the launch sequence's first two stages off one `AnimationController` (0–3400ms): the bento assembly (`bentoIn` → `bentoOut` → `markIn` → `wordmarkIn`), then the hold (`taglineIn` → `taglineOut`). It reads `isSignedIn` off `AppController` and calls `onResolved` at the 2950ms sync point, where `surfaceIn` ends — not at the end of the timeline, so the hand-off never plays against a page that is not built yet. Its last frame is the lockup at rest, which is exactly what `/landing` opens on. | you change what a cold start decides between, or restyle the brand-in animation |
 | 9 | `<Page>` | `features/<f>/presentation/view/pages/<page>/<page>_page.dart` | A `ConsumerWidget`/`ConsumerStatefulWidget`. Resolves the controller and its state at **build** time with `ref.watch`, reacts to one-shot outcomes with `ref.listen`, and passes tear-offs into callbacks — no `ref` call inside an event handler. | you build or restyle a screen |
-| 10 | `<Page>Controller` | `…/<page>/<page>_controller.dart` | The page's state holder: a `@riverpod` Notifier whose state is `AsyncValue<T>`. Resolves its dependencies **once**, in `build()`, onto fields; methods never touch `ref`. Wraps calls in `guardAppException` so only an `AppException` becomes error state — anything else escapes to the observer. | you add a user action, or change how a screen's state is derived |
+| 10 | `<Page>Controller` | `…/<page>/<page>_controller.dart` | The page's state holder: a `@riverpod` Notifier whose state is `AsyncValue<T>`. Resolves its dependencies **once**, in `build()`, onto fields with `ref.watch`; a method uses `ref.read` and nothing else. Wraps calls in `ref.guardAppException` so only an `AppException` becomes error state — anything else escapes to the observer. | you add a user action, or change how a screen's state is derived |
 
 **Where configuration actually lives.** `BuildConfiguration` (freezed, in
 `core`) holds the per-flavor settings. `buildConfigurationProvider` in `core` is
@@ -824,7 +876,7 @@ class LoginController extends _$LoginController {
     state = const AsyncValue.loading();
     // Only an AppException becomes error state; anything else escapes to the
     // observer instead of being swallowed.
-    state = await guardAppException(() => _loginUseCase.execute(input: email));
+    state = await ref.guardAppException(() => _loginUseCase.execute(input: email));
   }
 }
 ```

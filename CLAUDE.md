@@ -135,8 +135,7 @@ pair. Full diagram and reasoning: README's "Startup walkthrough".
    **`ref.watch` only in `build()`** (one registered from a method leaks —
    `build()` never re-registers it), **`ref.read` only in methods**. Resolve
    dependencies once in `build()` onto `late` fields; `ref.read` is for a
-   cross-cutting service no field should hold, which today means one thing:
-   `ref.guardAppException(…)` reaching `errorReporterProvider`.
+   one-off no field should hold — the startup work in `AppController.start()`.
 10. **Providers are typed as the domain contract** (`I<Feature>Repository`),
     never as the implementation. Everything below `presentation` is plain Dart
     with constructor parameters — constructible in a test with no container.
@@ -148,9 +147,10 @@ pair. Full diagram and reasoning: README's "Startup walkthrough".
     applied at the **root scope**. Never `switch` on the environment inside a
     provider — root overrides are what let a release build tree-shake the mock.
 13. `Override` is exported by `riverpod_annotation`, **not** `flutter_riverpod`.
-14. **`guardAppException` captures only `AppException`.** Anything else must
-    escape to `PlatformDispatcher.onError` / `AppProviderObserver` rather than
-    be swallowed. State is `AsyncValue<T>` — there is no status enum.
+14. **`guardAppException` captures only `AppException`, and never reports.**
+    Anything else escapes to `PlatformDispatcher.onError`; state is
+    `AsyncValue<T>`, with no status enum. Assigning the `AsyncError` fires
+    `providerDidFail`, so `AppProviderObserver` is the one reporting site.
 15. `riverpod_lint` is an analysis-server plugin declared once in the **root**
     `analysis_options.yaml`, never per package.
 

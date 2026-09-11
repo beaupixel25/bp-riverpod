@@ -209,6 +209,61 @@ _None yet._
   one step stricter than it. Dependencies are still resolved once in `build()`
   onto `late` fields — `ref.read` fetching a use case from a method is still
   wrong.
+- **D-6** (2026-09-10) — **`AppProviderObserver` is the only place a provider
+  failure is reported.** Riverpod calls `providerDidFail` for every error that
+  lands in provider state, captured or not (G-7), so the observer already sees
+  everything `guardAppException` catches; `guardAppException` therefore reports
+  nothing and is a plain `AsyncValue.guard` again. The observer tells the two
+  lanes apart by type, which is what the taxonomy is for: an `AppException` is
+  expected and renderable, so `reportHandled` (a breadcrumb, no stack trace);
+  anything else escaped typing on its way out of the data layer, so `report`
+  (a crash, with the stack trace). Its `log` line no longer interpolates
+  `$stackTrace` either — that ran whatever the reporter was, so it was the half
+  of the output swapping in a `NoopErrorReporter` could not turn off.
+  Rejected: marking the exception instance in `guardAppException` for the
+  observer to skip. Const `AppException` literals are canonicalized — the mock
+  repository throws `const UnauthorizedException(…)` — so an `Expando` or
+  identity set would mark every structurally identical instance. This aligns
+  the variant with `bp-mvvm` and `bp-bloc`, where a handled failure has always
+  produced exactly one breadcrumb and no stack trace.
+- **D-7** — the breadcrumb names the wrapped cause (absorbed into D-11; full text in CHANGELOG)
+- **D-8** — handled breadcrumbs carry both ends (superseded by D-11; full text in CHANGELOG)
+- **D-9** — `report` is the only method an implementation writes; `reportHandled` funnels into it with `handled: true`, and the shipped reporters `extends` rather than `implements` (full text in CHANGELOG)
+- **D-10** (2026-09-11) — **`handled at:` is the `on AppException` catch**,
+  not the code that started the action. Frame 0 of a `StackTrace.current`
+  captured inside the catch — `AppProviderObserver.providerDidFail` — with no filtering, mirroring
+  `thrown at:`, which is frame 0 of the origin trace. The question the field
+  answers is "what code handled this", and the handler is the answer; the
+  caller is a different question. This removed the frame filter entirely
+  (G-9), the entry-time capture (G-10), and the per-variant fork of
+  `errorReporter()` that the filter had forced — the template is one body for
+  all three variants again. Pinned by *"handledAt points at the catch block,
+  not the caller"* and *"names the handling block, frame 0 and unfiltered"*.
+
+- **D-11** (2026-09-11) — A handled breadcrumb carries **three** frames, not
+  two: `thrown at:` (frame 0 of `AppException.stackTrace`), `handled at:`
+  (frame 0 of a capture inside the `on AppException` catch, D-10) and
+  `invoked at:` — what *started* the action, e.g. the `signup.execute()` in a
+  view model. `invokedAt` needs its own capture, taken **before** the await,
+  because an async trace keeps only awaiting frames and a method that returns
+  the command's future without awaiting is gone by the catch (G-10, which
+  therefore applies again — to this field only). It is also the **one**
+  filtered frame: whoever captured it is the top of its own trace, so `core`
+  and the state-management package are stepped over to reach app code (G-9,
+  likewise back, scoped to `_callSiteFrame`). Riverpod passes one trace for
+  both — its observer runs synchronously from `state =`, so the controller is
+  under the framework's frames in the same capture — which is why
+  `errorReporter()` forks on state management: only that variant's skip list
+  needs `package:riverpod/`. The three render as a tree under the
+  `handled:` header — `├─`/`└─`, not an indent, because `dart:developer`
+  hands the console one multi-line string and a console may strip leading
+  whitespace or interleave other output between the lines — and share one
+  colour, since what they need to say is that they belong to the header, not
+  that they differ from each other. `ConsoleErrorReporter.colored` defaults to
+  `kDebugMode`: escape codes are noise in a log file, a CI job, or logcat, so
+  a debug build on a device wants `const ConsoleErrorReporter(colored:
+  false)`. Terminal detection was not an option — `dart:io` is not web-safe
+  and `core` builds for web.
 
 ## Gotchas
 <!-- append only · NEVER deleted · id G-<n> -->
@@ -233,14 +288,84 @@ _None yet._
   bare `ProviderScope` with no root override, and a throwing default would fire
   from inside `ref.guardAppException`'s catch — turning a handled failure into
   a crash in the code path meant to prevent one. Pinned in
-  `packages/hello/test/di/overrides_test.dart`.
+  `packages/hello/test/di/overrides_test.dart`. **Rationale superseded by D-6**
+  — `guardAppException` no longer reads the provider — but the default still
+  stands: `AppProviderObserver` resolves nothing, and app code may read it.
 - **G-6** — `bootstrap` binds the reporter by prepending an override to the
   list `overridesBuilder` returns, so the binding does not exist until that
   future completes. A failure captured *during* `overridesBuilder()`
   breadcrumbs to the default no-op, which is why `bootstrap`'s own `try`/`catch`
   reports composition failures directly instead of relying on the handled lane.
+- **G-7** — Assigning an `AsyncError` to a Notifier's `state` fires
+  `ProviderObserver.providerDidFail`, exactly as a throwing `build()` does.
+  Riverpod 3.4.2 `element.dart:106-121`: for an async provider the `AsyncError`
+  is stored as *data*, so the `result is! $ResultError<StateT>` guard does not
+  exclude it. So a deliberately captured failure is **not** invisible to the
+  observer, and any `guard`-style helper that also reports files every handled
+  failure twice — the second time as a crash with a stack trace. See D-6.
+- **G-8** — A test that exercises `guardAppException` through a bare `Provider`
+  proves nothing about the observer: a `Provider` merely *holding* an
+  `AsyncError` never fails, so `providerDidFail` never runs and an
+  `expect(crashes, isEmpty)` passes vacuously. That is how the G-7 double-report
+  shipped under a green test. Use an `AsyncNotifier` and pass
+  `observers: [AppProviderObserver(...)]` to `ProviderContainer.test`, as
+  `runGuarded` / `_probe` in `packages/core/test/error_handling_test.dart` now
+  do.
+
+- **G-9** — The breadcrumb's plumbing filter matches **`'(package:core/'`
+  and `'(dart:'` with the opening paren**, never the bare scheme. A frame reads
+  `Member (<uri>:<line>:<col>)`, so a bare `'dart:'` matches the `.dart:` that
+  ends *every* file path — every frame then looks like plumbing, the `orElse`
+  fallback becomes the only branch that runs, and `handled at:` prints
+  `providerDidFail` for every failure instead of the code that absorbed it. It fails
+  silently and looks plausible. Pinned by *"names the app frame, not the
+  plumbing that caught it"* in `packages/core/test/error_handling_test.dart`.
+
+  **Scope narrowed (D-11):** `handled at:` is frame 0 and
+  unfiltered; the filter survives for `invoked at:` alone.
+- **G-10** — `handledAt` is captured **where the action is invoked**, not in
+  the catch. A Dart async stack trace records only the frames that are
+  *awaiting*: a presentation method written
+  `Future<void> login() => _cmd.execute();` never awaits, so by the time the
+  failure comes back it is gone from the trace and the breadcrumb names
+  whichever widget happened to await — or, if nothing did, falls back to
+  the observer itself. Measured, not assumed: catch-capture lost both the view
+  model and the page; entry-capture keeps the whole synchronous chain. Pinned
+  by *"handledAt reaches a caller that never awaited"* in
+  `packages/core/test/error_handling_test.dart`.
+  Riverpod is the exception and needs no entry capture: its observer is
+  called synchronously from `state =`, so the controller is still on the
+  stack when `providerDidFail` runs.
+  **Scope narrowed (D-11):** the catch is the answer for
+  `handled at:`; entry capture is what `invoked at:` uses.
 
 ## Session Log
+- _2026-09-11_ — Handled-failure breadcrumbs rebuilt, and the generator with
+  them (D-7…D-10, G-9, G-10). `handled: UnknownException(code: null)` — which
+  names nothing — became the exception's full `toString()` plus `thrown at:`
+  and `handled at:`, both frame 0 and unfiltered; `reportHandled` now funnels
+  into `report` with `handled: true`, so an implementation writes one method
+  and `extends`. Two detours on the way, both reverted and both recorded: a
+  frame filter (G-9) and an entry-time capture (G-10), dropped once
+  `handled at:` was settled as the `on AppException` catch itself. `bp-cli`
+  carries the final shape; the three variants were regenerated from it and
+  verified byte-identical.
+- _2026-09-10_ — Fixed handled failures being reported twice (D-6, G-7, G-8).
+  Symptom: a `LoginRepository` throwing `UnimplementedError` printed a full
+  stack trace here but not in `bp-mvvm` / `bp-bloc`, whose
+  `ConsoleErrorReporter` is byte-identical — the failure was travelling two
+  lanes, not one. `guardAppException` dropped its
+  `reportHandled` call and is now a one-line `AsyncValue.guard` (its
+  `dart:async show unawaited` import went with it);
+  `AppProviderObserver.providerDidFail` dropped the `UnknownException`
+  normalization that only existed to unwrap `.cause` again, dropped
+  `$stackTrace` from its `log` line, and now branches
+  `reportHandled` / `report` on `error is AppException`. `errorReporterProvider`
+  stays — `bootstrap` still overrides it and `overrides_test` still pins it.
+  `error_handling_test.dart`'s `runGuarded` harness rebuilt on a real
+  `AsyncNotifier` inside a container carrying the observer; three of its cases
+  fail against the pre-fix source, the old vacuous one included. No app or
+  controller file changed.
 - _2026-09-10_ — `ErrorReporter` moved off the mutable `appErrorReporter`
   global and onto a Riverpod provider (D-4, D-5, G-5, G-6). Deleted the global
   from `core/src/error/error_reporter.dart` and added `ConsoleErrorReporter`
